@@ -1,295 +1,226 @@
-using UnityEngine;
-
-[System.Serializable]
-public class WalkCycleSettings
+Shader "Custom/HDRP_VertexAnimation"
 {
-    [Header("Animation Parameters")]
-    public int frameCount = 16;
-    public float cycleTime = 1.0f;
-    public float stepHeight = 0.3f;
-    public float stepLength = 0.8f;
-    public float bodyBob = 0.1f;
-    public float hipSway = 0.05f;
-    
-    [Header("Performance")]
-    public bool useHalfPrecision = true;
-    public int textureSize = 512;
-}
+    Properties
+    {
+        _BaseColor("Base Color", Color) = (0.8, 0.8, 0.8, 1)
+        _AnimationTexture("Animation Texture", 2D) = "white" {}
+        _AnimationTime("Animation Time", Range(0,1)) = 0
+        _IsWalking("Is Walking", Range(0,1)) = 0
+        _FrameCount("Frame Count", Int) = 16
+        _VertexCount("Vertex Count", Int) = 1000
+        _TextureWidth("Texture Width", Int) = 512
+        
+        [HideInInspector] _Surface("__surface", Float) = 0.0
+        [HideInInspector] _BlendMode("__blendmode", Float) = 0.0
+        [HideInInspector] _AlphaCutoff("Alpha Cutoff", Range(0.0, 1.0)) = 0.5
+        [HideInInspector] _ZWrite("__zw", Float) = 1.0
+        [HideInInspector] _CullMode("__cullmode", Float) = 2.0
+    }
 
-public class VertexAnimationController : MonoBehaviour
-{
-    [Header("Setup")]
-    public MeshRenderer targetRenderer;
-    public MeshFilter targetMeshFilter;
-    public WalkCycleSettings walkSettings = new WalkCycleSettings();
-    
-    [Header("Control")]
-    public bool isWalking = false;
-    public float walkSpeed = 2f;
-    public bool tankControls = true;
-    
-    private Texture2D animationTexture;
-    private Material animationMaterial;
-    private Mesh originalMesh;
-    private Vector3[] originalVertices;
-    private float animationTime;
-    
-    // Animation data
-    private Vector3[,] animationFrames;
-    
-    void Start()
+    HLSLINCLUDE
+    #pragma target 4.5
+    #pragma only_renderers d3d11 playstation xboxone xboxseries vulkan metal switch
+    #pragma multi_compile_instancing
+    #pragma multi_compile _ DOTS_INSTANCING_ON
+    ENDHLSL
+
+    SubShader
     {
-        SetupComponents();
-        GenerateWalkCycle();
-        CreateAnimationTexture();
-        SetupMaterial();
-    }
-    
-    void Update()
-    {
-        HandleInput();
-        UpdateAnimation();
-    }
-    
-    void SetupComponents()
-    {
-        if (!targetRenderer) targetRenderer = GetComponent<MeshRenderer>();
-        if (!targetMeshFilter) targetMeshFilter = GetComponent<MeshFilter>();
-        
-        if (!targetMeshFilter || !targetRenderer)
-        {
-            Debug.LogError("VertexAnimationController needs MeshRenderer and MeshFilter components!");
-            return;
+        Tags 
+        { 
+            "RenderPipeline" = "HDRenderPipeline"
+            "RenderType" = "Opaque"
+            "Queue" = "Geometry"
         }
-        
-        originalMesh = targetMeshFilter.sharedMesh;
-        Debug.Log($"Original mesh: {originalMesh?.name}, Is null: {originalMesh == null}");
-        
-        if (originalMesh == null)
+
+        Pass
         {
-            Debug.LogError("MeshFilter has no mesh assigned!");
-            return;
-        }
-        
-        originalVertices = originalMesh.vertices;
-        Debug.Log($"Mesh has {originalVertices.Length} vertices");
-        
-        if (originalVertices.Length == 0)
-        {
-            Debug.LogError("Mesh has 0 vertices! Check if 'Read/Write Enabled' is checked in the model import settings.");
-            return;
-        }
-        
-        if (originalVertices.Length > 10000)
-        {
-            Debug.LogWarning("Consider using a lower poly model for better performance");
-        }
-    }
-    
-    void HandleInput()
-    {
-        float horizontal = Input.GetAxis("Horizontal");
-        float vertical = Input.GetAxis("Vertical");
-        
-        if (tankControls)
-        {
-            // Tank controls like Resident Evil
-            if (Mathf.Abs(vertical) > 0.1f)
-            {
-                Vector3 movement = transform.forward * vertical * walkSpeed * Time.deltaTime;
-                transform.position += movement;
-                isWalking = true;
-            }
-            else
-            {
-                isWalking = false;
-            }
+            Name "Forward"
+            Tags { "LightMode" = "Forward" }
+
+            Blend One Zero
+            ZWrite On
+            Cull Back
+
+            HLSLPROGRAM
+            #pragma vertex Vert
+            #pragma fragment Frag
             
-            if (Mathf.Abs(horizontal) > 0.1f)
-            {
-                transform.Rotate(0, horizontal * 90f * Time.deltaTime, 0);
-            }
-        }
-        else
-        {
-            // Modern movement
-            Vector3 input = new Vector3(horizontal, 0, vertical);
-            if (input.magnitude > 0.1f)
-            {
-                Vector3 movement = input.normalized * walkSpeed * Time.deltaTime;
-                transform.position += movement;
-                transform.rotation = Quaternion.LookRotation(input.normalized);
-                isWalking = true;
-            }
-            else
-            {
-                isWalking = false;
-            }
-        }
-    }
-    
-    void UpdateAnimation()
-    {
-        if (isWalking)
-        {
-            animationTime += Time.deltaTime / walkSettings.cycleTime;
-            if (animationTime > 1f) animationTime -= 1f;
-        }
-        else
-        {
-            animationTime = Mathf.Lerp(animationTime, 0f, Time.deltaTime * 2f);
-        }
-        
-        if (animationMaterial)
-        {
-            animationMaterial.SetFloat("_AnimationTime", animationTime);
-            animationMaterial.SetFloat("_IsWalking", isWalking ? 1f : 0f);
-        }
-    }
-    
-    void GenerateWalkCycle()
-    {
-        animationFrames = new Vector3[walkSettings.frameCount, originalVertices.Length];
-        
-        for (int frame = 0; frame < walkSettings.frameCount; frame++)
-        {
-            float t = (float)frame / walkSettings.frameCount;
-            GenerateFrameVertices(frame, t);
-        }
-    }
-    
-    void GenerateFrameVertices(int frameIndex, float normalizedTime)
-    {
-        for (int i = 0; i < originalVertices.Length; i++)
-        {
-            Vector3 vertex = originalVertices[i];
-            Vector3 animatedVertex = vertex;
+            #include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Common.hlsl"
+            #include "Packages/com.unity.render-pipelines.high-definition/Runtime/ShaderLibrary/ShaderVariables.hlsl"
             
-            float vertexHeight = vertex.y;
-            float maxHeight = GetMeshBounds().max.y;
-            float minHeight = GetMeshBounds().min.y;
-            float heightRatio = (vertexHeight - minHeight) / (maxHeight - minHeight);
+            TEXTURE2D(_AnimationTexture);
+            SAMPLER(sampler_AnimationTexture);
             
-            if (heightRatio < 0.3f)
-            {
-                animatedVertex = AnimateLegs(vertex, normalizedTime, vertex.x > 0);
-            }
-            else if (heightRatio < 0.6f)
-            {
-                animatedVertex = AnimateHips(vertex, normalizedTime);
-            }
-            else if (heightRatio < 0.9f)
-            {
-                animatedVertex = AnimateChest(vertex, normalizedTime);
-            }
+            CBUFFER_START(UnityPerMaterial)
+                float4 _BaseColor;
+                float _AnimationTime;
+                float _IsWalking;
+                int _FrameCount;
+                int _VertexCount;
+                int _TextureWidth;
+            CBUFFER_END
             
-            animationFrames[frameIndex, i] = animatedVertex;
-        }
-    }
-    
-    Vector3 AnimateLegs(Vector3 vertex, float t, bool isRightSide)
-    {
-        Vector3 result = vertex;
-        float phase = isRightSide ? t : (t + 0.5f) % 1f;
-        
-        float stepCycle = Mathf.Sin(phase * Mathf.PI * 2f);
-        float liftCycle = Mathf.Max(0, Mathf.Sin(phase * Mathf.PI));
-        
-        result.z += stepCycle * walkSettings.stepLength * 0.5f;
-        result.y += liftCycle * walkSettings.stepHeight;
-        
-        return result;
-    }
-    
-    Vector3 AnimateHips(Vector3 vertex, float t)
-    {
-        Vector3 result = vertex;
-        result.x += Mathf.Sin(t * Mathf.PI * 2f) * walkSettings.hipSway;
-        result.y += Mathf.Sin(t * Mathf.PI * 4f) * walkSettings.bodyBob * 0.5f;
-        return result;
-    }
-    
-    Vector3 AnimateChest(Vector3 vertex, float t)
-    {
-        Vector3 result = vertex;
-        result.x -= Mathf.Sin(t * Mathf.PI * 2f) * walkSettings.hipSway * 0.3f;
-        result.y += Mathf.Sin(t * Mathf.PI * 4f) * walkSettings.bodyBob * 0.3f;
-        return result;
-    }
-    
-    void CreateAnimationTexture()
-    {
-        int texWidth = walkSettings.textureSize;
-        int texHeight = Mathf.CeilToInt((float)(originalVertices.Length * 3) / texWidth);
-        
-        TextureFormat format = walkSettings.useHalfPrecision ? TextureFormat.RGBAHalf : TextureFormat.RGBAFloat;
-        animationTexture = new Texture2D(texWidth, texHeight * walkSettings.frameCount, format, false);
-        animationTexture.filterMode = FilterMode.Point;
-        animationTexture.wrapMode = TextureWrapMode.Clamp;
-        
-        Color[] pixels = new Color[texWidth * texHeight * walkSettings.frameCount];
-        
-        for (int frame = 0; frame < walkSettings.frameCount; frame++)
-        {
-            for (int vertex = 0; vertex < originalVertices.Length; vertex++)
+            struct Attributes
             {
-                Vector3 animVertex = animationFrames[frame, vertex];
-                Vector3 offset = animVertex - originalVertices[vertex];
+                float3 positionOS : POSITION;
+                float3 normalOS : NORMAL;
+                uint vertexID : SV_VertexID;
+                UNITY_VERTEX_INPUT_INSTANCE_ID
+            };
+            
+            struct Varyings
+            {
+                float4 positionCS : SV_POSITION;
+                float3 normalWS : TEXCOORD0;
+                float3 positionWS : TEXCOORD1;
+                UNITY_VERTEX_INPUT_INSTANCE_ID
+            };
+            
+            Varyings Vert(Attributes input)
+            {
+                Varyings output;
+                UNITY_SETUP_INSTANCE_ID(input);
+                UNITY_TRANSFER_INSTANCE_ID(input, output);
                 
-                int pixelIndex = frame * texWidth * texHeight + vertex;
-                if (pixelIndex < pixels.Length)
+                float3 positionOS = input.positionOS;
+                
+                // Apply vertex animation if walking
+                if (_IsWalking > 0.5)
                 {
-                    pixels[pixelIndex] = new Color(offset.x, offset.y, offset.z, 1f);
+                    float frame = _AnimationTime * (_FrameCount - 1);
+                    int frameA = (int)floor(frame);
+                    int frameB = min(frameA + 1, _FrameCount - 1);
+                    float frameLerp = frac(frame);
+                    
+                    // Calculate texture coordinates
+                    int pixelsPerFrame = _VertexCount;
+                    int heightPerFrame = (_VertexCount + _TextureWidth - 1) / _TextureWidth;
+                    
+                    int vertexIndex = input.vertexID;
+                    int pixelX = vertexIndex % _TextureWidth;
+                    int pixelYOffset = vertexIndex / _TextureWidth;
+                    
+                    float u = (pixelX + 0.5) / (float)_TextureWidth;
+                    float vA = (frameA * heightPerFrame + pixelYOffset + 0.5) / (float)(_FrameCount * heightPerFrame);
+                    float vB = (frameB * heightPerFrame + pixelYOffset + 0.5) / (float)(_FrameCount * heightPerFrame);
+                    
+                    // Sample animation texture
+                    float3 offsetA = SAMPLE_TEXTURE2D_LOD(_AnimationTexture, sampler_AnimationTexture, float2(u, vA), 0).xyz;
+                    float3 offsetB = SAMPLE_TEXTURE2D_LOD(_AnimationTexture, sampler_AnimationTexture, float2(u, vB), 0).xyz;
+                    
+                    float3 offset = lerp(offsetA, offsetB, frameLerp);
+                    positionOS += offset;
                 }
+                
+                // Transform to world and clip space
+                float3 positionWS = TransformObjectToWorld(positionOS);
+                output.positionCS = TransformWorldToHClip(positionWS);
+                output.positionWS = positionWS;
+                output.normalWS = TransformObjectToWorldNormal(input.normalOS);
+                
+                return output;
             }
+            
+            float4 Frag(Varyings input) : SV_Target
+            {
+                UNITY_SETUP_INSTANCE_ID(input);
+                
+                // Simple lighting
+                float3 lightDir = normalize(float3(0.5, 1.0, 0.3));
+                float3 normalWS = normalize(input.normalWS);
+                float ndotl = saturate(dot(normalWS, lightDir));
+                
+                float3 ambient = float3(0.3, 0.3, 0.35);
+                float3 diffuse = _BaseColor.rgb * ndotl;
+                
+                return float4(ambient + diffuse, 1.0);
+            }
+            
+            ENDHLSL
         }
         
-        animationTexture.SetPixels(pixels);
-        animationTexture.Apply();
-        
-        Debug.Log($"Created animation texture: {texWidth}x{texHeight * walkSettings.frameCount}");
-    }
-    
-    void SetupMaterial()
-    {
-        Shader shader = Shader.Find("Custom/HDRP_VertexAnimation");
-        
-        if (shader == null)
+        // Shadow caster pass
+        Pass
         {
-            Debug.LogError("Could not find shader 'Custom/HDRP_VertexAnimation'! Make sure the shader file is in your project.");
-            return;
+            Name "ShadowCaster"
+            Tags { "LightMode" = "ShadowCaster" }
+            
+            ZWrite On
+            ZTest LEqual
+            ColorMask 0
+            Cull Back
+
+            HLSLPROGRAM
+            #pragma vertex ShadowVert
+            #pragma fragment ShadowFrag
+            
+            #include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Common.hlsl"
+            #include "Packages/com.unity.render-pipelines.high-definition/Runtime/ShaderLibrary/ShaderVariables.hlsl"
+            
+            TEXTURE2D(_AnimationTexture);
+            SAMPLER(sampler_AnimationTexture);
+            
+            CBUFFER_START(UnityPerMaterial)
+                float _AnimationTime;
+                float _IsWalking;
+                int _FrameCount;
+                int _VertexCount;
+                int _TextureWidth;
+            CBUFFER_END
+            
+            struct Attributes
+            {
+                float3 positionOS : POSITION;
+                uint vertexID : SV_VertexID;
+            };
+            
+            struct Varyings
+            {
+                float4 positionCS : SV_POSITION;
+            };
+            
+            Varyings ShadowVert(Attributes input)
+            {
+                Varyings output;
+                float3 positionOS = input.positionOS;
+                
+                // Same vertex animation as forward pass
+                if (_IsWalking > 0.5)
+                {
+                    float frame = _AnimationTime * (_FrameCount - 1);
+                    int frameA = (int)floor(frame);
+                    int frameB = min(frameA + 1, _FrameCount - 1);
+                    float frameLerp = frac(frame);
+                    
+                    int heightPerFrame = (_VertexCount + _TextureWidth - 1) / _TextureWidth;
+                    int vertexIndex = input.vertexID;
+                    int pixelX = vertexIndex % _TextureWidth;
+                    int pixelYOffset = vertexIndex / _TextureWidth;
+                    
+                    float u = (pixelX + 0.5) / (float)_TextureWidth;
+                    float vA = (frameA * heightPerFrame + pixelYOffset + 0.5) / (float)(_FrameCount * heightPerFrame);
+                    float vB = (frameB * heightPerFrame + pixelYOffset + 0.5) / (float)(_FrameCount * heightPerFrame);
+                    
+                    float3 offsetA = SAMPLE_TEXTURE2D_LOD(_AnimationTexture, sampler_AnimationTexture, float2(u, vA), 0).xyz;
+                    float3 offsetB = SAMPLE_TEXTURE2D_LOD(_AnimationTexture, sampler_AnimationTexture, float2(u, vB), 0).xyz;
+                    
+                    float3 offset = lerp(offsetA, offsetB, frameLerp);
+                    positionOS += offset;
+                }
+                
+                output.positionCS = TransformWorldToHClip(TransformObjectToWorld(positionOS));
+                return output;
+            }
+            
+            float4 ShadowFrag(Varyings input) : SV_Target
+            {
+                return 0;
+            }
+            
+            ENDHLSL
         }
-        
-        animationMaterial = new Material(shader);
-        Debug.Log($"Shader being used: {animationMaterial.shader.name}");
-        
-        animationMaterial.SetTexture("_AnimationTexture", animationTexture);
-        animationMaterial.SetInt("_AnimFrameCount", walkSettings.frameCount);
-        animationMaterial.SetInt("_VertexCount", originalVertices.Length);
-        animationMaterial.SetInt("_TextureWidth", walkSettings.textureSize);
-        
-        targetRenderer.material = animationMaterial;
     }
     
-    Bounds GetMeshBounds()
-    {
-        if (originalMesh) return originalMesh.bounds;
-        
-        Vector3 min = originalVertices[0];
-        Vector3 max = originalVertices[0];
-        
-        for (int i = 1; i < originalVertices.Length; i++)
-        {
-            min = Vector3.Min(min, originalVertices[i]);
-            max = Vector3.Max(max, originalVertices[i]);
-        }
-        
-        return new Bounds((min + max) * 0.5f, max - min);
-    }
-    
-    void OnDestroy()
-    {
-        if (animationTexture) DestroyImmediate(animationTexture);
-        if (animationMaterial) DestroyImmediate(animationMaterial);
-    }
+    FallBack "Hidden/HDRP/FallbackError"
 }
